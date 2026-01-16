@@ -16,7 +16,7 @@ tags: []
 
 dependencies: {}
 
-repository: https://github.com/poc-examples/ansible-collections
+repository: https://github.com/na-launch-workshop/platform-ansible-collections
 documentation: http://docs.example.com
 homepage: http://example.com
 issues: http://example.com/issue/tracker

@@ -61,11 +61,11 @@
               metadata:
                 labels:
                   machine.openshift.io/cluster-api-machineset: "{{ machineset_name }}"
-                  platform.poc-examples.com/workload-role: "{{ machineset.name }}"
+                  platform.na-launch-workshop.com/workload-role: "{{ machineset.name }}"
               spec:
                 metadata:
                   labels:
-                    platform.poc-examples.com/workload-role: "{{ machineset.name }}"
+                    platform.na-launch-workshop.com/workload-role: "{{ machineset.name }}"
                 providerSpec:
                   value:
                     acceleratedNetworking: true
