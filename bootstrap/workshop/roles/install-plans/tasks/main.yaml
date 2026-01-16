@@ -1,0 +1,49 @@
+- name: "List all InstallPlans in the namespace"
+  kubernetes.core.k8s_info:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ namespace }}"
+  register: installplans
+  until:
+    - installplans.resources | length > 0
+  retries: 40
+  delay: 30
+
+- debug:
+    msg: "{{ installplans.resources }}"
+
+- name: "Filter InstallPlans waiting for approval"
+  set_fact:
+    pending_installplans: "{{ installplans.resources | selectattr('spec.approved', 'equalto', false) | list }}"
+
+- debug:
+    msg: "{{ pending_installplans }}"
+
+- name: "Find InstallPlans associated with specific CSV"
+  set_fact:
+    csv_installplans: "{{ pending_installplans | selectattr('spec.clusterServiceVersionNames', 'contains', csv_name) | list }}"
+
+- debug:
+    msg: "{{ csv_installplans }}"
+
+- name: "Approve pending InstallPlans for {{ csv_name }}"
+  kubernetes.core.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ namespace }}"
+    definition:
+      spec:
+        approved: true
+  loop: "{{ csv_installplans }}"
+  when: 
+    - csv_installplans | length > 0
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  register: approval_result

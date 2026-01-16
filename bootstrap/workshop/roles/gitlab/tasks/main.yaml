@@ -1,0 +1,160 @@
+#########################################################
+## This action loops over the deployment status of
+## the gitlab webserver checking the status is healthy
+## before continuing
+#########################################################
+- name: Wait Until GitLab Web Server is Running
+  block:
+
+    - name: Waiting for Verification
+      debug:
+        msg: "Starting verification of the GitLab Webserver deployment in the gitlab-system namespace."
+
+    - name: Check GitLab Webserver Deployment Status
+      community.kubernetes.k8s_info:
+        host: "{{ api_url }}"
+        api_key: "{{ token }}"
+        validate_certs: "{{ validate_certs }}"
+        kind: Deployment
+        name: "gitlab-webservice-default"
+        namespace: "gitlab-system"
+      register: gitlab_webserver_status
+      until:
+        - gitlab_webserver_status.resources | length > 0
+        - gitlab_webserver_status.resources[0].status.readyReplicas | default(0) == gitlab_webserver_status.resources[0].status.replicas
+      retries: 40
+      delay: 30
+
+
+#########################################################
+## To Authenticate the rest of the calls, we fetch the 
+## GitLab root user secret and base63decode it.
+#########################################################
+- name: Fetch GitLab Admin Password
+  community.kubernetes.k8s_info:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: v1
+    kind: Secret
+    name: gitlab-gitlab-initial-root-password
+    namespace: "gitlab-system"
+  register: gitlab_admin_secret
+
+- name: Decode Admin Password
+  set_fact:
+    decoded_secret: "{{ gitlab_admin_secret.resources[0].data.password | b64decode }}"
+
+
+#########################################################
+## Backstage requires an access token in order to provision
+## repositories.  We create a group called self-provisioned
+## and generate an access token for it.  If the script is run
+## again it will be regenerated and rotated through the system
+#########################################################
+- name: "Create GitLab Workshop Group"
+  community.general.gitlab_group:
+    api_url: https://gitlab.{{ domain }}
+    validate_certs: false
+    api_username: root
+    api_password: "{{ decoded_secret }}"
+    name: self-provisioned
+    path: self-provisioned
+    visibility: "internal"
+    auto_devops_enabled: false
+    state: present
+  register: self_provisioned_group
+
+- name: "Creating self-provisioned group access token"
+  community.general.gitlab_group_access_token:
+    api_url: https://gitlab.{{ domain }}
+    validate_certs: false
+    api_username: root
+    api_password: "{{ decoded_secret }}"
+    group: "self-provisioned"
+    name: "self-provisioned"
+    expires_at:  "{{ '%Y-%m-%d' | strftime((ansible_date_time.epoch | int) + 60*60*24*120) }}"
+    access_level: owner
+    recreate: state_change
+    scopes:
+      - api
+      - read_api
+      - create_runner
+      - k8s_proxy
+      - read_repository
+      - write_repository
+      - read_registry
+      - write_registry
+      - ai_features
+    state: present
+  register: group_access_token
+
+##########################################################
+## Developers also need a group in order to set restricted
+## permissions blocking merging to main and direct commits
+## This also provides an Access Token for DevSpaces
+##########################################################
+# - name: "Create GitLab Developers Group"
+#   community.general.gitlab_group:
+#     api_url: https://gitlab.{{ domain }}
+#     validate_certs: false
+#     api_username: root
+#     api_password: "{{ decoded_secret }}"
+#     name: developers
+#     path: developers
+#     visibility: "internal"
+#     auto_devops_enabled: false
+#     project_creation_level: "developer"
+#     state: present
+#   register: developers_group
+
+#########################################################
+## When the secret is either generated or recreated
+## the new secret is persisted to a secret
+#########################################################
+- name: GitLab - Create Backstage Group Token Access Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: gitlab-group-access-pat
+        namespace: "gitlab-system"
+      data:
+        GITLAB_TOKEN: "{{ group_access_token.access_token.token | b64encode }}"
+  when: 
+    - group_access_token.access_token.token is defined
+
+#########################################################
+## Create a PushSecret to pick up the group access token
+## and persist it to Vault
+#########################################################
+- name: Import GitLab - Push Admin Token
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: external-secrets.io/v1alpha1
+      kind: PushSecret
+      metadata:
+        name: "gitlab-group-token-secret-priming"
+        namespace: gitlab-system
+      spec:
+        deletionPolicy: Delete
+        refreshInterval: 10s
+        secretStoreRefs:
+          - name: eso-admin-secret-store
+            kind: ClusterSecretStore
+        selector:
+          secret:
+            name: "gitlab-group-access-pat"
+        data:
+          - match:
+              secretKey: "GITLAB_TOKEN"
+              remoteRef:
+                remoteKey: "gitlab"
+                property: "group_access_token"

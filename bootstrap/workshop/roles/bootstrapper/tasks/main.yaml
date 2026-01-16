@@ -1,0 +1,338 @@
+- name: Set Overrides
+  set_fact:
+    api_port: "{{ cluster.port | default('6443', true) }}"
+
+- name: Fetch Terraform State when Exists
+  when:
+    - cluster.type is defined
+    - cluster.type != "local"
+    - cluster.create is defined
+    - cluster.create == true
+  block:
+
+    - name: Fetch Terraform State
+      ansible.builtin.shell:
+        cmd: "terraform output -json"
+        chdir: "../terraform"
+      register: tf_outputs
+
+    - name: Load Terraform State
+      ansible.builtin.set_fact:
+        terraform_outputs: "{{ tf_outputs.stdout | from_json }}"
+
+#####################################################################
+## Clusters like ROSA & HCP will allow you to configure credentials 
+## directly, while if the cluster is OCP your providing kubeadmin from
+## hyperconsole.  This sets the global level, further in the script if
+## the credentials are per cluster and not global those get set in the
+## cluster config and will override these.
+#####################################################################
+- name: Set Global Credentials
+  when:
+    - openshift.credentials.admin is defined
+  ansible.builtin.set_fact:
+    cluster_credentials:
+      username: "{{ credentials.admin.username }}"
+      password: "{{ credentials.admin.password }}"
+
+######################################################################
+######################################################################
+## Set the defaults for the rest of the run & Gather Shared Cluster
+## Information
+######################################################################
+######################################################################
+- name: Set OpenShift Defaults
+  ansible.builtin.set_fact:
+    validate_certs: "{{ cluster.validate_certs | default(false) }}"
+    openshift_domain: "{{ 
+        cluster['domain'] 
+          | default(terraform_outputs[cluster.name + '_domain']['value'], true) 
+      }}"
+    shared_cluster_enabled: "{{ cluster.workshop.sharedClusterRef is defined | bool }}"
+    shared_cluster:
+      enabled: ""
+      domain: ""
+      ingress_domain: ""
+
+- name: Gather Shared Cluster Information
+  when: 
+    - shared_cluster_enabled == true
+  block: 
+
+    - name: Locate Configured Shared Cluster
+      ansible.builtin.set_fact:
+        shared_cluster_data: "{{ 
+            openshift.clusters 
+              | selectattr('workshop.chart.settings.stage', 'equalto', 'shared') 
+              | list | first 
+          }}"
+
+    - name: Map Shared Cluster Domain
+      ansible.builtin.set_fact:
+        shared_cluster_domain: "{{ 
+            shared_cluster_data['domain'] 
+              | default(terraform_outputs[cluster.workshop.sharedClusterRef + '_domain']['value'], true) }}"
+
+    - name: Map Shared Cluster API URL
+      ansible.builtin.set_fact:
+        shared_cluster_api_url: "https://api.{{ shared_cluster_domain }}:{{ api_port }}"
+
+    - name: Azure Get Shared Cluster Ingress
+      when:
+        - shared_cluster_data.type == "aro"
+      block:
+
+        - name: Azure Login
+          ansible.builtin.command: >
+            az login \
+              --tenant {{ shared_cluster_data.providerCredentials.tenant_id }} \
+              --service-principal \
+                -u {{ shared_cluster_data.providerCredentials.client_id }} \
+                -p {{ shared_cluster_data.providerCredentials.client_secret }}
+
+        - name: Fetch Credentials
+          ansible.builtin.command: >
+            az aro list-credentials \
+              --name {{ shared_cluster_data.name }} \
+              --resource-group {{ shared_cluster_data.providerCredentials.resource_group_name }}
+          register: aro_credential
+
+        - name: Set ARO Credentials
+          ansible.builtin.set_fact:
+            cluster_credentials:
+              username: "{{ (aro_credential.stdout | from_json).kubeadminUsername }}"
+              password: "{{ (aro_credential.stdout | from_json).kubeadminPassword }}"
+
+        - name: Connecting Shared Cluster - Can Take up to 7-15 Minutes
+          community.okd.openshift_auth:
+            host: "{{ shared_cluster_api_url }}"
+            username: "{{ cluster_credentials.username }}"
+            password: "{{ cluster_credentials.password }}"
+            verify_ssl: false
+          register: login
+          retries: 45
+          delay: 30
+
+        - name: Fetch Shared Cluster Ingress
+          community.kubernetes.k8s_info:
+            host: "{{ shared_cluster_api_url }}"
+            api_key: "{{ login.openshift_auth.api_key }}"
+            validate_certs: "{{ validate_certs }}"
+            api_version: config.openshift.io/v1
+            kind: Ingress
+            name: cluster
+          register: ingress_info
+
+        - name: Map Shared Cluster Ingress
+          ansible.builtin.set_fact:
+            shared_cluster:
+              domain: "{{ shared_cluster_domain }}"
+              ingress_domain: "{{ 
+                  ingress_info.resources[0].spec.domain 
+                    | regex_replace('^apps\\.', '') 
+                }}"
+              api_port: "{{ shared_cluster_data['port'] | default('6443', true) }}"
+
+    - name: Non-Azure Get Shared Cluster Ingress
+      when:
+        - cluster.type != "aro"
+      block:
+
+        - name: Override Credentials for Shared Cluster
+          when:
+            - shared_cluster_data.credentials is defined
+            - shared_cluster_data.credentials.admin is defined
+          ansible.builtin.set_fact:
+            cluster_credentials:
+              username: "{{ shared_cluster_data.credentials.admin.username }}"
+              password: "{{ shared_cluster_data.credentials.admin.password }}"
+
+        - name: Connecting Shared Cluster - Can Take up to 7-15 Minutes
+          community.okd.openshift_auth:
+            host: "{{ shared_cluster_api_url }}"
+            username: "{{ cluster_credentials.username }}"
+            password: "{{ cluster_credentials.password }}"
+            verify_ssl: false
+          register: login
+          retries: 45
+          delay: 30
+
+        - name: Fetch Shared Cluster Ingress
+          community.kubernetes.k8s_info:
+            host: "{{ shared_cluster_api_url }}"
+            api_key: "{{ login.openshift_auth.api_key }}"
+            validate_certs: "{{ validate_certs }}"
+            api_version: config.openshift.io/v1
+            kind: Ingress
+            name: cluster
+          register: ingress_info
+
+        - name: Map Shared Cluster Ingress
+          ansible.builtin.set_fact:
+            shared_cluster:
+              domain: "{{ shared_cluster_domain }}"
+              ingress_domain: "{{ 
+                  ingress_info.resources[0].spec.domain 
+                    | regex_replace('^apps\\.', '') 
+                }}"
+              api_port: "{{ shared_cluster_data['port'] | default('6443', true) }}"
+
+###########################################################################
+## The rest of this script is scoped to the cluster being configured,
+## if the cluster is in a shared setup it will use the information gathered
+###########################################################################
+- name: Parse Login Credentials
+  block:
+
+    ## GLOBALS CREDENTIALS
+    - name: Set Global Credentials
+      when:
+        - openshift.credentials.admin is defined
+      ansible.builtin.set_fact:
+        cluster_credentials:
+          username: "{{ credentials.admin.username }}"
+          password: "{{ credentials.admin.password }}"
+
+    ## OVERRIDE Global WITH DECLARED CREDENTIALS
+    - name: Override Credentials
+      when:
+        - cluster.credentials is defined
+        - cluster.credentials.admin is defined
+      ansible.builtin.set_fact:
+        cluster_credentials:
+          username: "{{ cluster.credentials.admin.username }}"
+          password: "{{ cluster.credentials.admin.password }}"
+
+    ################################################################################### 
+    ## Generally: AWS ROSA/HCP Clusters are have bootsrapped credentials
+    ## There is no way to grab credentials from hyperconsole
+    ## Only ARO can really fetch credentials
+    ## If the cluster is not ARO and you don't have credentials login to hyperconsole
+    ## and set them in credentials key in cluster config
+    ###################################################################################
+    - name: Fetch ARO Credentials
+      when:
+        - cluster.type == "aro"
+      block:
+
+        - name: Azure Login
+          ansible.builtin.command: >
+            az login \
+              --tenant {{ cluster.providerCredentials.tenant_id }} \
+              --service-principal \
+                -u {{ cluster.providerCredentials.client_id }} \
+                -p {{ cluster.providerCredentials.client_secret }}
+
+        - name: Fetch Credentials
+          ansible.builtin.command: >
+            az aro list-credentials \
+              --name {{ cluster.name }} \
+              --resource-group {{ cluster.providerCredentials.resource_group_name }}
+          register: aro_credential
+
+        - debug:
+            var: aro_credential.stdout
+
+        - name: Set ARO Credentials
+          ansible.builtin.set_fact:
+            cluster_credentials:
+              username: "{{ (aro_credential.stdout | from_json).kubeadminUsername }}"
+              password: "{{ (aro_credential.stdout | from_json).kubeadminPassword }}"
+
+- name: Set Default Cluster Parameters
+  ansible.builtin.set_fact:
+    cluster_api_url: "https://api.{{ openshift_domain }}:{{ api_port }}"
+    gitops:
+      enabled: "{{ cluster.workshop.gitops.enabled | default(true) }}"
+      channel: gitops-1.14
+      namespace: openshift-gitops
+
+- debug:
+    var: cluster_api_url
+
+- debug:
+    var: cluster_credentials
+
+- name: Connecting to OpenShift - Can Take up to 7-15 Minutes
+  community.okd.openshift_auth:
+    host: "{{ cluster_api_url }}"
+    username: "{{ cluster_credentials.username }}"
+    password: "{{ cluster_credentials.password }}"
+    verify_ssl: false
+  register: login
+  retries: 45
+  delay: 30
+
+- name: Waiting for OpenShift Healthy State - Can Take up to 12-15 Minutes
+  community.kubernetes.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: v1
+    kind: Pod
+  register: pod_info
+  until:
+    - pod_info.resources is defined
+    - pod_info.resources | length > 0
+    - pod_info.resources | selectattr('status.phase', 'equalto', 'Pending') | length == 0
+  retries: 40
+  delay: 30
+
+- name: Fetch Cluster Ingress
+  community.kubernetes.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: ingress_info
+
+- name: Get Domain from Cluster Ingress
+  set_fact:
+    ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
+
+- name: Install OpenShift-GitOps Operator
+  vars:
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
+  ansible.builtin.include_role:
+    name: gitops-operator
+  when:
+    - gitops.enabled is true
+
+- name: Configure OpenShift-GitOps Instance
+  vars:
+    domain: "{{ ingress_domain }}"
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
+    workshop: "{{ cluster.workshop }}"
+  ansible.builtin.include_role:
+    name: gitops-instance
+  when:
+    - gitops.enabled is true
+
+- name: Secrets Management
+  vars:
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
+    secrets: "{{ cluster.secrets }}"
+    rosa_token: "{{ cluster.providerCredentials.rosa_token }}"
+    aro_credentials:
+      CLIENT_ID: "{{ cluster.providerCredentials.client_id }}"
+      CLIENT_SECRET: "{{ cluster.providerCredentials.client_secret }}"
+      SUBSCRIPTION_ID: "{{ cluster.providerCredentials.subscription_id }}"
+      TENANT_ID: "{{ cluster.providerCredentials.tenant_id }}"
+      RESOURCE_GROUP_NAME: "{{ cluster.providerCredentials.resource_group_name }}"
+      LOCATION: "{{ cluster.providerCredentials.location }}"
+    aws_credentials:
+      AWS_ACCESS_KEY_ID: "{{ cluster.providerCredentials.aws_access_key_id }}"
+      AWS_SECRET_ACCESS_KEY: "{{ cluster.providerCredentials.aws_secret_access_key }}"
+    keycloak_users: "{{ credentials.users }}"
+  ansible.builtin.import_role:
+    name: secrets-manager
+
+- name: Links 
+  debug:
+    msg: |
+      console url: https://console-openshift-console.apps.{{ ingress_domain }}

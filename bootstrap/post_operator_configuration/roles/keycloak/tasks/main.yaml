@@ -1,0 +1,229 @@
+- name: Format Configuration Variables
+  set_fact:
+    config:
+      cluster:
+        cluster_name: "{{ cluster_name }}"
+        region: "{{ region }}"
+        rosa_token: "{{ lookup('env', 'ROSA_TOKEN') }}"
+        aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+      client:
+        client_id: "{{ lookup('env', 'CLIENT_ID') }}"
+        client_secret: "{{ lookup('env', 'CLIENT_SECRET') }}"
+      idp:
+        username: "{{ lookup('env', 'ADMIN_USERNAME') }}"
+        password: "{{ lookup('env', 'ADMIN_PASSWORD') }}"
+        issuer_url: https://keycloak-keycloak.{{ domain }}/auth/realms/{{ lookup('env', 'CLIENT_ID') }}
+
+- name: Get cluster infrastructure info
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: infra_result
+
+- name: Set ROSA detection fact
+  set_fact:
+    is_rosa: "{{ infra_result.resources[0].status.platform | lower == 'aws' }}"
+
+- name: Patch With ROSA CLI
+  when: is_rosa
+  block:
+
+    - debug:
+        msg: "Is AWS: {{ is_rosa }}"
+
+    - name: Log ROSA Version
+      command: rosa version
+      register: rosa_version
+    - debug:
+        msg: "{{ rosa_version }}"
+
+    - name: Login to ROSA
+      command: rosa login --token={{ config.cluster.rosa_token }}
+      register: rosa_login_output
+    - debug:
+        msg: "{{ rosa_login_output.stdout }}"
+
+    - name: Check if Identity Provider exists
+      command: |
+        rosa list idps \
+          --cluster={{ config.cluster.cluster_name }} \
+          --region={{ config.cluster.region }} \
+          -o json
+      register: rosa_idps
+    - name: Set IDP Facts
+      set_fact:
+        idp: "{{ rosa_idps.stdout | from_json }}"
+    - debug:
+        msg: "{{ idp }}"
+
+    - debug:
+        msg: "idp does exists"
+      when: idp | selectattr('name', 'equalto', config.client.client_id) | list | length > 0
+
+    - name: Add Identity Provider if not exists
+      when: idp | selectattr('name', 'equalto', config.client.client_id) | list | length < 1
+      block:
+        - name: Add ROSA Identity Provider
+          command: >
+            rosa create idp
+            --cluster={{ config.cluster.cluster_name }}
+            --name={{ config.client.client_id }}
+            --type="openid"
+            --client-id={{ config.client.client_id }}
+            --client-secret={{ config.client.client_secret }}
+            --issuer-url={{ config.idp.issuer_url }}
+            --mapping-method="claim"
+            --email-claims="email"
+            --name-claims="name"
+            --groups-claims="groups"
+            --username-claims="preferred_username"
+            --region={{ config.cluster.region }}
+          register: add_idp_output
+        - debug:
+            msg: "idp does not exist"
+
+- name: Patch OAuth (OCP/ARO/SNO/etc.)
+  when: not is_rosa
+  block:
+
+    - debug:
+        msg: "not rosa"
+
+    - name: Create Keyclock OAuth Secret
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: keycloak-client-secret
+            namespace: openshift-config
+          stringData:
+            clientSecret: "{{ config.client.client_secret }}"
+
+    - name: Patch OAuth config to include Keycloak IdP
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: config.openshift.io/v1
+          kind: OAuth
+          metadata:
+            name: cluster
+            namespace: openshift-config
+          spec:
+            identityProviders:
+              - name: "keycloak"
+                mappingMethod: claim
+                type: OpenID
+                openID:
+                  clientID: "{{ config.client.client_id }}"
+                  clientSecret:
+                    name: keycloak-client-secret
+                  issuer:
+                    https://keycloak-keycloak.{{ domain }}/auth/realms/{{ config.client.client_id }}
+                  claims:
+                    groups:
+                      - groups
+                    email:
+                      - email
+                    name:
+                      - name
+                    preferredUsername:
+                      - preferred_username
+
+- name: Create a Keycloak group, authentication with credentials
+  community.general.keycloak_group:
+    auth_client_id: "admin-cli"
+    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    validate_certs: false
+    auth_realm: master
+    auth_username: "{{ config.idp.username }}"
+    auth_password: "{{ config.idp.password }}"
+    name: cluster-admins
+    realm: "{{ config.client.client_id }}"
+  register: group
+
+- name: Create a Keycloak group, authentication with credentials
+  community.general.keycloak_group:
+    auth_client_id: "admin-cli"
+    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    validate_certs: false
+    auth_realm: master
+    auth_username: "{{ config.idp.username }}"
+    auth_password: "{{ config.idp.password }}"
+    name: developers
+    realm: "{{ config.client.client_id }}"
+  register: group
+
+- name: Get Keycloak access token
+  uri:
+    url: "https://keycloak-keycloak.{{ domain }}/auth/realms/master/protocol/openid-connect/token"
+    method: POST
+    body:
+      grant_type: password
+      client_id: admin-cli
+      username: "{{ config.idp.username }}"
+      password: "{{ config.idp.password }}"
+    body_format: form-urlencoded
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    return_content: true
+    validate_certs: false
+  register: keycloak_token
+
+- name: Set default group in Keycloak realm
+  uri:
+    url: "https://keycloak-keycloak.{{ domain }}/auth/admin/realms/{{ config.client.client_id }}/default-groups/{{ group.end_state.id }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      realm: "{{ config.client.client_id }}"
+      groupId: "{{ group.end_state.id }}"
+    status_code: 204
+    validate_certs: false
+  register: set_default_group_response
+
+- debug:
+    var: set_default_group_response
+
+- name: Retrieve Keycloak Initial Users Secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-users
+    namespace: keycloak
+  register: keycloak_secret
+
+- name: Extract and Decode Users from Secret
+  set_fact:
+    keycloak_users: "{{ (keycloak_secret.resources[0].data.users | b64decode) | from_json }}"
+
+- name: Create initial keycloak users
+  community.general.keycloak_user:
+    auth_client_id: "admin-cli"
+    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    validate_certs: false
+    auth_realm: master
+    auth_username: "{{ config.idp.username }}"
+    auth_password: "{{ config.idp.password }}"
+    realm: "{{ config.client.client_id }}"
+    username: "{{ user.username }}"
+    first_name: "{{ user.username }}"
+    last_name: "system"
+    email: "{{ user.username }}@openshift.com"
+    emailVerified: true
+    enabled: true
+    groups:
+      - name: "{{ user.group }}"
+        state: present
+    credentials:
+      - type: password
+        value: "{{ user.password }}"
+        temporary: false
+  loop: "{{ keycloak_users }}"
+  loop_control:
+    loop_var: user
+  no_log: true

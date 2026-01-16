@@ -1,0 +1,189 @@
+---
+
+- name: Set Secrets Management Parameters
+  set_fact:
+    vault_token: "{{ credentials.vault.token }}"
+    target_namespace: "secrets-manager"
+    vault_enabled: "{{ secrets.vault.enabled | default(true) }}"
+
+- name: Ensure Secrets Manager Namespace
+  kubernetes.core.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ target_namespace }}"
+
+- name: Ensure Service Account for Secrets Access
+  kubernetes.core.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: external-secrets-kubeaccess-sa
+        namespace: "{{ target_namespace }}"
+
+- name: Ensure Service Account RBAC
+  kubernetes.core.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: secrets-access
+        namespace: "{{ target_namespace }}"
+      rules:
+        - apiGroups:
+            - ""
+          resources:
+            - "secrets"
+          verbs:
+            - "get"
+            - "list"
+            - "watch"
+        - apiGroups:
+            - authorization.k8s.io
+          resources:
+            - selfsubjectrulesreviews
+          verbs:
+            - create
+
+- name: Link Service Account to RBAC
+  kubernetes.core.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: secrets-access-binding
+        namespace: "{{ target_namespace }}"
+      subjects:
+        - kind: ServiceAccount
+          name: external-secrets-kubeaccess-sa
+          namespace: "{{ target_namespace }}"
+      roleRef:
+        kind: Role
+        name: secrets-access
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Ensure Admin Vault Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: vault-token
+        namespace: "{{ target_namespace }}"
+      stringData:
+        token: "{{ vault_token }}"
+  when:
+    - vault_enabled is true
+
+- name: Ensure ROSA Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: rosa-token
+        namespace: "{{ target_namespace }}"
+      stringData:
+        token: "{{ rosa_token }}"
+  when:
+    - rosa_token is defined
+    - rosa_token != ""
+
+- name: Ensure AWS Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: aws-credentials
+        namespace: "{{ target_namespace }}"
+      stringData:
+        AWS_ACCESS_KEY_ID: "{{ aws_credentials.AWS_ACCESS_KEY_ID }}"
+        AWS_SECRET_ACCESS_KEY: "{{ aws_credentials.AWS_SECRET_ACCESS_KEY }}"
+  when:
+    - aws_credentials is defined
+    - aws_credentials.AWS_ACCESS_KEY_ID is defined
+    - aws_credentials.AWS_ACCESS_KEY_ID != ""
+    - aws_credentials.AWS_SECRET_ACCESS_KEY is defined
+    - aws_credentials.AWS_SECRET_ACCESS_KEY != ""
+
+- name: Ensure ARO Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: aro-credentials
+        namespace: "{{ target_namespace }}"
+      stringData:
+        CLIENT_ID: "{{ aro_credentials.CLIENT_ID }}"
+        CLIENT_SECRET: "{{ aro_credentials.CLIENT_SECRET }}"
+        SUBSCRIPTION_ID: "{{ aro_credentials.SUBSCRIPTION_ID }}"
+        TENANT_ID: "{{ aro_credentials.TENANT_ID }}"
+        RESOURCE_GROUP_NAME: "{{ aro_credentials.RESOURCE_GROUP_NAME }}"
+        LOCATION: "{{ aro_credentials.LOCATION }}"
+  when:
+    - aro_credentials is defined
+    - aro_credentials.CLIENT_ID is defined
+    - aro_credentials.CLIENT_ID != ""
+    - aro_credentials.CLIENT_SECRET is defined
+    - aro_credentials.CLIENT_SECRET != ""
+    - aro_credentials.RESOURCE_GROUP_NAME is defined
+    - aro_credentials.RESOURCE_GROUP_NAME != ""
+    - aro_credentials.TENANT_ID is defined
+    - aro_credentials.TENANT_ID != ""
+
+- name: Secrets Manager - Create Keycloak Initial Lab Users
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "keycloak-initial-users"
+        namespace: "{{ target_namespace }}"
+      stringData:
+        users: "{{ keycloak_users | to_json }}"
+
+- name: Secrets Manager - Create Secrets
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ target_namespace }}"
+      stringData: "{{ item.secrets }}"
+  loop: "{{ secrets.pushSecrets | default([])}}"
+  no_log: true

@@ -1,0 +1,326 @@
+#########################################################
+# Ensure That OpenShift GitOps is Running Before Starting
+#########################################################
+- name: Ensure OpenShift-GitOps CRDs Exists
+  kubernetes.core.k8s_info:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "argocds.argoproj.io"
+  register: argocd_crd
+  until:
+    - argocd_crd.resources is defined
+    - argocd_crd.resources | length > 0
+  retries: 40
+  delay: 30
+
+#########################################################
+# Configure the ARGOCD Instance
+# Health Checks Give Better Feedback about sync success
+#########################################################
+- name: Configure ArgoCD Instance
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: argoproj.io/v1beta1
+      kind: ArgoCD
+      metadata:
+        name: "{{ gitops.namespace }}"
+        namespace: "{{ gitops.namespace }}"
+      spec:
+        extraConfig:
+          resource.customizations: |
+            argoproj.io/Application:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = ""
+                if obj.status ~= nil then
+                  if obj.status.health ~= nil then
+                    hs.status = obj.status.health.status
+                    if obj.status.health.message ~= nil then
+                      hs.message = obj.status.health.message
+                    end
+                  end
+                end
+                return hs
+
+            argoproj.io/ApplicationSet:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "Waiting for all child applications to be healthy"
+                if obj.status ~= nil and obj.status.resources ~= nil then
+                  local allHealthy = true
+                  for i, resource in ipairs(obj.status.resources) do
+                    if resource.kind == "Application" and (resource.health == nil or resource.health.status ~= "Healthy" or resource.status ~= "Synced") then
+                      allHealthy = false
+                      hs.message = "Application " .. resource.name .. " is not healthy or not synced"
+                      break
+                    end
+                  end
+                  if allHealthy then
+                    hs.status = "Healthy"
+                    hs.message = "All child applications are healthy and synced"
+                  end
+                end
+                return hs
+
+            operators.coreos.com/Subscription:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "Unknown subscription state or upgrade in progress."
+                if obj.status ~= nil then 
+                  if (obj.status.state == "UpgradePending" or obj.status.state == "AtLatestKnown") then
+                    hs.status = "Healthy"
+                    hs.message = "Subscription is at specified version."
+                  end
+                end
+                return hs
+
+            batch/v1:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "Batch job still needs to run or has errors"
+                if obj.status ~= nil then
+                  if (obj.status.succeeded > 0) then
+                    hs.status = "Healthy"
+                    hs.message = "Batch job has succeeded without errors"
+                  end
+                end
+                return hs
+
+            external-secrets.io/ExternalSecret:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "ExternalSecret is still syncing or not yet ready"
+                if obj.status ~= nil and obj.status.conditions ~= nil then
+                  for i, condition in ipairs(obj.status.conditions) do
+                    if condition.type == "Ready" and condition.status == "True" then
+                      hs.status = "Healthy"
+                      hs.message = "ExternalSecret has been synced successfully"
+                    end
+                  end
+                end
+                return hs
+
+            external-secrets.io/PushSecret:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "PushSecret is not yet synced or still in progress"
+                if obj.status ~= nil and obj.status.conditions ~= nil then
+                  for i, condition in ipairs(obj.status.conditions) do
+                    if condition.type == "Ready" and condition.status == "True" then
+                      hs.status = "Healthy"
+                      hs.message = "PushSecret synced successfully"
+                      return hs
+                    end
+                  end
+                end
+                return hs
+
+            apps.gitlab.com/GitLab:
+              health.lua: |
+                hs = {}
+                hs.status = "Progressing"
+                hs.message = "GitLab is not yet fully running or still initializing"
+                if obj.status ~= nil and obj.status.phase == "Running" then
+                  hs.status = "Healthy"
+                  hs.message = "GitLab is running and available to accept requests"
+                end
+                return hs
+
+        controller:
+          # Less resource requirements on controller
+          diff:
+            server:
+              side: "true"
+          app:
+            state:
+              cache:
+                expiration: "2m0s"
+          repo:
+            server:
+              timeout:
+                seconds: "180"
+          status:
+            processors: "60"
+          operation:
+            processors: "30"
+          # Infinite Retries
+          k8sclient:
+            retry:
+              max: "-1"
+          kubectl:
+            parallelism:
+              limit: "30"
+          # BOOST THESE BASED ON CONTROLLER LOAD
+          resources:
+            limits:
+              cpu: '1'
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+          # sharding:
+          #   enabled: true
+          #   replicas: 2
+
+        applicationSet:
+          extraCommandArgs:
+            - "--enable-progressive-syncs"
+          # BOOST THESE BASED ON APP CONTROLLER LOAD
+          resources:
+            limits:
+              cpu: '1'
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+          # sharding:
+          #   enabled: true
+          #   replicas: 2
+        server:
+          route:
+            enabled: true
+          insecure: true
+        kustomizeBuildOptions: '--enable-helm'
+
+- name: Configure Default Cluster
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "default-cluster"
+        namespace: "openshift-gitops"
+      stringData:
+        config: '{"tlsClientConfig":{"insecure":false}}'
+        name: "default"
+        nameNormalized: "default"
+        server: "https://kubernetes.default.svc"
+
+- name: Configure ArgoCD Plugin
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: console.openshift.io/v1
+      kind: ConsolePlugin
+      metadata:
+        name: gitops-plugin
+      spec:
+        backend:
+          service:
+            basePath: /
+            name: gitops-plugin
+            namespace: "{{ gitops.namespace }}"
+            port: 9001
+          type: Service
+        displayName: GitOps Plugin
+        i18n:
+          loadType: Preload
+
+#############################################################
+## Create The Cluster
+#############################################################
+- name: Build Cluster Manifest for Rollout Controller
+  ansible.builtin.set_fact:
+    rendered_clusters: |
+      shared:
+        enabled: {{ shared_cluster_enabled | string }}
+        domain: {{ shared_cluster_enabled | bool | ternary('apps.' ~ shared_cluster.ingress_domain, 'none') }}
+        api_port: {{ shared_cluster_enabled | bool | ternary(shared_cluster.api_port, 'none') }}
+      cloud:
+        region: {{ cluster.providerCredentials.region | default('not_available')}}
+        location: {{ cluster.providerCredentials.location | default('not_available')}}
+      cluster: 
+        type: {{ cluster.type }}
+        domain: apps.{{ domain }}
+        name: {{ cluster.cluster_name | default(cluster.name) }}
+        version: {{ cluster.version | default('not_available') }}
+        role: {{ workshop.chart.settings.role }}
+      settings:
+        vault:
+          token: {{ credentials.vault.token }}
+        keycloak:
+          registrationAllowed: {{ openshift.credentials.registrationAllowed | default(false) | bool }}
+      clusters:
+      {% for cluster in openshift.clusters %}
+        - name: {{ cluster.name }}
+          stage: {{ cluster.workshop.chart.settings.stage }}
+          domain: {{ (cluster.type == 'hcp' and (cluster['domain'] | default('', true) | length > 0)) | ternary('rosa.', '') }}{{ cluster['domain'] | default(terraform_outputs[cluster.name + '_domain']['value'], true) }}
+          api_port: {{ cluster.port | default('6443', true)}}
+          role: {{ cluster.workshop.chart.settings.role }}
+          type: {{ cluster.type }}
+      {% endfor %}
+
+######################################################################
+## Call the Orchestrator which is templates from the Cluster Values CM
+######################################################################
+- name: Create WorkShop Application
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: "infrastructure-{{ workshop.chart.name }}"
+        namespace: "{{ gitops.namespace }}"
+      spec:
+        destination:
+          namespace: "{{ gitops.namespace }}"
+          server: 'https://kubernetes.default.svc'
+        source:
+          chart: "{{ workshop.chart.name }}"
+          repoURL: "{{ workshop.chart.repo }}"
+          targetRevision: "{{ workshop.chart.version }}"
+          helm:
+            values: |
+              external_secrets:
+                enabled: true
+                k8sConnector:
+                  enabled: true
+              vault:
+                enabled: true
+              gitlab:
+                enabled: true
+              keycloak:
+                enabled: true
+              devhub:
+                enabled: true
+              {{ rendered_clusters }}
+        project: default
+        timeout: 120
+        syncPolicy:
+          retry:
+            limit: 10
+            backoff:
+              duration: 5s
+              factor: 2
+              maxDuration: 30s
+          automated:
+            selfHeal: true
+          managedNamespaceMetadata:
+            labels:
+              argocd.argoproj.io/managed-by: "{{ gitops.namespace }}"
+          syncOptions:
+            - CreateNamespace=false
+            - Validate=false
+  when:
+    - workshop.chart.enabled is defined
+    - workshop.chart.enabled is true
