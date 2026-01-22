@@ -217,7 +217,7 @@
     emailVerified: true
     enabled: true
     groups:
-      - name: "{{ user.group }}"
+      - name: workshop-admins
         state: present
     credentials:
       - type: password

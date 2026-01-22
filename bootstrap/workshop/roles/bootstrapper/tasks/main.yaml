@@ -244,7 +244,7 @@
     cluster_api_url: "https://api.{{ openshift_domain }}:{{ api_port }}"
     gitops:
       enabled: "{{ cluster.workshop.gitops.enabled | default(true) }}"
-      channel: gitops-1.14
+      channel: gitops-1.19
       namespace: openshift-gitops
 
 - debug:
