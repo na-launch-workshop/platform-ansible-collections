@@ -78,8 +78,28 @@
   ansible.builtin.debug:
     msg: "Organization 'workshop' created (or already exists for idempotency)"
 
-## TODO: if token exists, we either need to delete it or obtain the value
-- name: Generate Gitea Access Token for workshop organization
+- name: Get Gitea admin's existing access tokens
+  ansible.builtin.uri:
+    url: "https://gitea.{{ domain }}/api/v1/users/{{ gitea_username }}/tokens"
+    method: GET
+    user: "{{ gitea_username }}"
+    password: "{{ gitea_password }}"
+    force_basic_auth: yes
+    body_format: json
+  register: all_tokens
+
+- name: Delete existing token named 'workshop-org-access-token'
+  ansible.builtin.uri:
+    url: "https://gitea.{{ domain }}/api/v1/users/{{ gitea_username }}/tokens/{{ item.id }}"
+    method: DELETE
+    user: "{{ gitea_username }}"
+    password: "{{ gitea_password }}"
+    force_basic_auth: yes
+    status_code: 204
+  loop: "{{ all_tokens.json }}"
+  when: item.name == "workshop-org-access-token"
+
+- name: Generate Gitea access token for workshop orgg
   ansible.builtin.uri:
     url: "https://gitea.{{ domain }}/api/v1/users/{{ gitea_username }}/tokens"
     method: POST
