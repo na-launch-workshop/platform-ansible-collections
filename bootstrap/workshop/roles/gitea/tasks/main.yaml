@@ -1,0 +1,172 @@
+#########################################################
+## This action loops over the deployment status of
+## the gitlab webserver checking the status is healthy
+## before continuing
+#########################################################
+- name: Wait Until Gitea Web Server is Running
+  block:
+
+    - name: Waiting for Verification
+      debug:
+        msg: "Starting verification of the Gitea Server deployment in the gitea namespace."
+
+    - name: Check Gitea Server Deployment Status
+      community.kubernetes.k8s_info:
+        host: "{{ api_url }}"
+        api_key: "{{ token }}"
+        validate_certs: "{{ validate_certs }}"
+        kind: Deployment
+        name: "gitea-service"
+        namespace: "gitea"
+      register: gitea_server_status
+      until:
+        - gitea_server_status.resources | length > 0
+        - gitea_server_status.resources[0].status.readyReplicas | default(0) == gitea_server_status.resources[0].status.replicas
+      retries: 40
+      delay: 30
+
+#########################################################
+## To Authenticate the rest of the calls, we fetch the 
+## Gitea admin username and password.
+#########################################################
+- name: Fetch Gitea Deployment
+  community.kubernetes.k8s_info:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: v1
+    kind: Deployment
+    name: gitea-service
+    namespace: "gitea"
+  register: gitea_deployment
+
+- name: Extract Username and Password from Gitea Deployment
+  set_fact:
+    gitea_username: "{{ gitea_deployment.resources[0].spec.template.spec.initContainers | selectattr('name', 'equalto', 'configure-gitea') | map(attribute='env') | flatten | selectattr('name', 'equalto', 'GITEA_ADMIN_USERNAME') | map(attribute='value') | first }}"
+    gitea_password: "{{ gitea_deployment.resources[0].spec.template.spec.initContainers | selectattr('name', 'equalto', 'configure-gitea') | map(attribute='env') | flatten | selectattr('name', 'equalto', 'GITEA_ADMIN_PASSWORD') | map(attribute='value') | first }}"
+
+# - name: DEBUG - Print out Gitea username and password
+#   ansible.builtin.debug:
+#     msg: "Gitea username: {{ gitea_username }} and password: {{ gitea_password }}"
+
+#########################################################
+## Backstage requires an access token in order to provision
+## repositories.  We create a group called self-provisioned
+## and generate an access token for it.  If the script is run
+## again it will be regenerated and rotated through the system
+#########################################################
+
+- name: Create the Gitea 'workshop' organization
+  ansible.builtin.uri:
+    url: "https://gitea.{{ domain }}/api/v1/orgs"
+    method: POST
+    user: "{{ gitea_username }}"
+    password: "{{ gitea_password }}"
+    force_basic_auth: yes
+    body_format: json
+    body:
+      username: "workshop"
+      description: "Workshop administrators"
+      visibility: "public" # or "private", "limited"
+    status_code: [201, 409, 422] # 201 Created, 409 Conflict (if it already exists), 422 for malformed API call
+    validate_certs: true # Set to false if you use a self-signed certificate
+  register: create_org_result
+  changed_when: create_org_result.status == 201
+  failed_when: create_org_result.status not in [201, 409, 422]
+
+- name: Display organization creation status
+  ansible.builtin.debug:
+    msg: "Organization 'workshop' created (or already exists for idempotency)"
+
+## TODO: if token exists, we either need to delete it or obtain the value
+- name: Generate Gitea Access Token for workshop organization
+  ansible.builtin.uri:
+    url: "https://gitea.{{ domain }}/api/v1/users/{{ gitea_username }}/tokens"
+    method: POST
+    user: "{{ gitea_username }}"
+    password: "{{ gitea_password }}"
+    force_basic_auth: yes
+    body_format: json
+    body:
+      name: "workshop-org-access-token"
+      scopes: ["all"] # Define required scopes
+    status_code: 201
+  register: gitea_token_response
+
+# - name: DEBUG - Print out Gitea access token
+#   ansible.builtin.debug:
+#     msg: "Gitea access token: {{ gitea_token_response.json.sha1 }}"
+ 
+##########################################################
+## Developers also need a group in order to set restricted
+## permissions blocking merging to main and direct commits
+## This also provides an Access Token for DevSpaces
+##########################################################
+- name: Create the Gitea 'developers' organization
+  ansible.builtin.uri:
+    url: "https://gitea.{{ domain }}/api/v1/orgs"
+    method: POST
+    user: "{{ gitea_username }}"
+    password: "{{ gitea_password }}"
+    force_basic_auth: yes
+    body_format: json
+    body:
+      username: "developers"
+      description: "Developers"
+      visibility: "public" # or "private", "limited"
+    status_code: [201, 409, 422] # 201 Created, 409 Conflict (if it already exists), 422 for malformed API call
+    validate_certs: true # Set to false if you use a self-signed certificate
+  register: create_org_result
+  changed_when: create_org_result.status == 201
+  failed_when: create_org_result.status not in [201, 409, 422]
+
+#########################################################
+## When the secret is either generated or recreated
+## the new secret is persisted to a secret
+#########################################################
+- name: Gitea - Create Backstage Group Token Access Credentials
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: gitea-group-access-pat
+        namespace: "gitea"
+      data:
+        GITEA_TOKEN: "{{ gitea_token_response.json.sha1 }}"
+  when: 
+    - gitea_token_response.json.sha1 is defined
+
+#########################################################
+## Create a PushSecret to pick up the group access token
+## and persist it to Vault
+#########################################################
+- name: Import Gitea - Push Admin Token
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: external-secrets.io/v1alpha1
+      kind: PushSecret
+      metadata:
+        name: "gitea-group-token-secret-priming"
+        namespace: gitea
+      spec:
+        deletionPolicy: Delete
+        refreshInterval: 10s
+        secretStoreRefs:
+          - name: eso-admin-secret-store
+            kind: ClusterSecretStore
+        selector:
+          secret:
+            name: "gitea-group-access-pat"
+        data:
+          - match:
+              secretKey: "GITEA_TOKEN"
+              remoteRef:
+                remoteKey: "gitea"
+                property: "group_access_token"
