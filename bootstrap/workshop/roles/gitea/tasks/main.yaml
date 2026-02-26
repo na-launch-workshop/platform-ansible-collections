@@ -156,7 +156,7 @@
         name: gitea-group-access-pat
         namespace: "gitea"
       data:
-        GITEA_TOKEN: "{{ gitea_token_response.json.sha1 }}"
+        GITEA_TOKEN: "{{ gitea_token_response.json.sha1 | b64encode }}"
   when: 
     - gitea_token_response.json.sha1 is defined
 
