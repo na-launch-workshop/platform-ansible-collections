@@ -158,3 +158,68 @@
               remoteRef:
                 remoteKey: "gitlab"
                 property: "group_access_token"
+
+#########################################################
+## Register an application in GitLab for Dev Spaces and
+## create a PushSecret to persist credentials to Vault
+#########################################################
+
+- name: Register Dev Spaces application in GitLab
+  community.general.gitlab_application:
+    api_url: https://gitlab.{{ domain }}
+    api_username: root
+    api_password: "{{ decoded_secret }}"
+    name: "Dev Spaces"
+    redirect_uri: "https://devspaces.{{ domain }}/api/oauth/callback"
+    scopes:
+      - api
+      - write_repository
+      - openid
+    state: present
+  register: gitlab_app_result
+
+- name: Create local secret for ESO source
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: gitlab-app-credentials-source
+        namespace: openshift-devspaces
+      type: Opaque
+      data:
+        devspaces-app-id: "{{ gitlab_app_result.application_id | b64encode }}"
+        devspaces-app-secret: "{{ gitlab_app_result.secret | b64encode }}"
+
+- name: Import GitLab - Push Admin Token
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: external-secrets.io/v1alpha1
+      kind: PushSecret
+      metadata:
+        name: gitlab-devspaces-app
+        namespace: openshift-devspaces
+      spec:
+        deletionPolicy: Delete
+        refreshInterval: 10s
+        secretStoreRefs:
+          - name: eso-admin-secret-store
+            kind: ClusterSecretStore
+        selector:
+          secret:
+            name: gitlab-app-credentials-source
+        data:
+          - match:
+              secretKey: devspaces-app-id
+              remoteRef:
+                remoteKey: gitlab
+                property: devspaces-app-id
+          - match:
+              secretKey: devspaces-app-secret
+              remoteRef:
+                remoteKey: gitlab
+                property: devspaces-app-secret
