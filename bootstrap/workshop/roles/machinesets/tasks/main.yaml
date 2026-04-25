@@ -97,7 +97,7 @@
 #     msg: "{{ `{{ infra_details }}` }}"
 
 # - name: ACS Machines - Fetch Existing Worker MachineSet Information
-#   community.kubernetes.k8s_info:
+#   kubernetes.core.k8s_info:
 #     host: "{{ `{{ openshift.api_url }}` }}"
 #     api_key: "{{ `{{ openshift.token }}` }}"
 #     validate_certs: "{{ `{{ openshift.validate_certs }}` }}"
@@ -214,7 +214,7 @@
 #     msg: "{{ `{{ infra_details.json.status.infrastructureName }}` }}-managed-workers-{{ `{{ existing_machinesets[0].spec.template.spec.providerSpec.value.placement.region }}` }}1"
 
 # - name: Wait for MachineSet to be schedulable
-#   community.kubernetes.k8s_info:
+#   kubernetes.core.k8s_info:
 #     api_version: machine.openshift.io/v1beta1
 #     host: "{{ `{{ openshift.api_url }}` }}"
 #     api_key: "{{ `{{ openshift.token }}` }}"

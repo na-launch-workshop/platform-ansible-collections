@@ -11,7 +11,7 @@
         msg: "Starting verification of the Gitea Server deployment in the gitea namespace."
 
     - name: Check Gitea Server Deployment Status
-      community.kubernetes.k8s_info:
+      kubernetes.core.k8s_info:
         host: "{{ api_url }}"
         api_key: "{{ token }}"
         validate_certs: "{{ validate_certs }}"
@@ -30,7 +30,7 @@
 ## Gitea admin username and password.
 #########################################################
 - name: Fetch Gitea Deployment
-  community.kubernetes.k8s_info:
+  kubernetes.core.k8s_info:
     host: "{{ api_url }}"
     api_key: "{{ token }}"
     validate_certs: "{{ validate_certs }}"
@@ -99,7 +99,7 @@
   loop: "{{ all_tokens.json }}"
   when: item.name == "workshop-org-access-token"
 
-- name: Generate Gitea access token for workshop orgg
+- name: Generate Gitea access token for workshop org
   ansible.builtin.uri:
     url: "https://gitea.{{ domain }}/api/v1/users/{{ gitea_username }}/tokens"
     method: POST

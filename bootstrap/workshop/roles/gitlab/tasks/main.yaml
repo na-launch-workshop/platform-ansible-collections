@@ -11,7 +11,7 @@
         msg: "Starting verification of the GitLab Webserver deployment in the gitlab-system namespace."
 
     - name: Check GitLab Webserver Deployment Status
-      community.kubernetes.k8s_info:
+      kubernetes.core.k8s_info:
         host: "{{ api_url }}"
         api_key: "{{ token }}"
         validate_certs: "{{ validate_certs }}"
@@ -31,7 +31,7 @@
 ## GitLab root user secret and base63decode it.
 #########################################################
 - name: Fetch GitLab Admin Password
-  community.kubernetes.k8s_info:
+  kubernetes.core.k8s_info:
     host: "{{ api_url }}"
     api_key: "{{ token }}"
     validate_certs: "{{ validate_certs }}"
@@ -44,7 +44,6 @@
 - name: Decode Admin Password
   set_fact:
     decoded_secret: "{{ gitlab_admin_secret.resources[0].data.password | b64decode }}"
-
 
 #########################################################
 ## Backstage requires an access token in order to provision
@@ -73,7 +72,7 @@
     api_password: "{{ decoded_secret }}"
     group: "self-provisioned"
     name: "self-provisioned"
-    expires_at:  "{{ '%Y-%m-%d' | strftime((ansible_date_time.epoch | int) + 60*60*24*120) }}"
+    expires_at: "{{ '%Y-%m-%d' | strftime((ansible_facts.date_time.epoch | int) + 60*60*24*120) }}"
     access_level: owner
     recreate: state_change
     scopes:
@@ -107,6 +106,149 @@
     project_creation_level: "developer"
     state: present
   register: developers_group
+
+##########################################################
+## Create Instance-wide OAuth Application for Dev Spaces
+##########################################################
+- name: Obtain OAuth token using root password
+  ansible.builtin.uri:
+    url: "https://gitlab.{{ domain }}/oauth/token"
+    method: POST
+    body_format: json
+    body:
+      grant_type: "password"
+      username: "root"
+      password: "{{ decoded_secret }}" # Your root password
+    status_code: [200, 201]
+  register: auth_response
+
+- name: "Create short expiry root Personal Access Token"
+  ansible.builtin.uri:
+    url: "https://gitlab.{{ domain }}/api/v4/users/1/personal_access_tokens"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+    body_format: json
+    body:
+      name: "Ansible Automation Token"
+      scopes:
+        - api
+        - read_api
+        - read_user
+        - read_repository
+        - write_repository
+        - read_registry
+        - write_registry
+        - read_service_ping
+        - self_rotate
+        - ai_features
+        - create_runner
+        - manage_runner
+        - k8s_proxy
+        - admin_mode
+      # Sets expiry to 2 days from now
+      expires_at: "{{ '%Y-%m-%d' | strftime((ansible_facts.date_time.epoch | int) + 2*86400) }}"
+    status_code: 201
+  register: pat_creation_result
+
+- name: Set token as a fact
+  set_fact:
+    gitlab_access_token: "{{ pat_creation_result.json.token }}"
+
+- name: "Check if OAuth application named Dev Spaces exists"
+  ansible.builtin.uri:
+    url: "https://gitlab.{{ domain }}/api/v4/applications"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ gitlab_access_token }}"
+      Content-Type: "application/json"
+    status_code: [200, 201]
+  register: existing_apps
+
+- name: "Set existence flag for Dev Spaces application"
+  set_fact:
+    dev_spaces_exists: >-
+      {{ 
+        existing_apps.json | type_debug == 'list' and
+        existing_apps.json | selectattr('application_name', 'defined') | selectattr('application_name', 'equalto', 'Dev Spaces') | list | length > 0 
+      }}
+
+- name: Create Instance-wide OAuth application
+  ansible.builtin.uri:
+    url: "https://gitlab.{{ domain }}/api/v4/applications"
+    method: POST
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "Dev Spaces"
+      redirect_uri: "https://devspaces.{{ domain }}/api/oauth/callback"
+      scopes: "api read_api read_user write_repository read_repository ai_features openid profile email"
+      trusted: true
+      confidential: true
+    status_code: [200, 201]
+  register: oauth_app_result
+  when: not dev_spaces_exists
+
+#########################################################
+## Register an application in GitLab for Dev Spaces and
+## create a PushSecret to persist credentials to Vault
+#########################################################
+
+- name: Create local secret for ESO source
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        annotations:
+          che.eclipse.org/oauth-scm-server: gitlab
+          che.eclipse.org/scm-server-endpoint: https://gitlab.{{ domain }}
+        name: gitlab-oauth-config
+        namespace: openshift-operators
+        labels:
+          app.kubernetes.io/component: oauth-scm-configuration
+          app.kubernetes.io/part-of: che.eclipse.org
+      type: Opaque
+      data:
+        id: "{{ oauth_app_result.json.application_id | b64encode }}"
+        secret: "{{ oauth_app_result.json.secret | b64encode }}"
+  when: not dev_spaces_exists
+
+- name: Import GitLab - Push Admin Token
+  community.okd.k8s:
+    host: "{{ api_url }}"
+    api_key: "{{ token }}"
+    validate_certs: "{{ validate_certs }}"
+    definition:
+      apiVersion: external-secrets.io/v1alpha1
+      kind: PushSecret
+      metadata:
+        name: gitlab-oauth-config
+        namespace: openshift-operators
+      spec:
+        deletionPolicy: Delete
+        refreshInterval: 10s
+        secretStoreRefs:
+          - name: eso-admin-secret-store
+            kind: ClusterSecretStore
+        selector:
+          secret:
+            name: gitlab-oauth-config
+        data:
+          - match:
+              secretKey: id
+              remoteRef:
+                remoteKey: gitlab
+                property: devspaces-app-id
+          - match:
+              secretKey: secret
+              remoteRef:
+                remoteKey: gitlab
+                property: devspaces-app-secret
+  when: not dev_spaces_exists
 
 #########################################################
 ## When the secret is either generated or recreated
@@ -159,67 +301,10 @@
                 remoteKey: "gitlab"
                 property: "group_access_token"
 
-#########################################################
-## Register an application in GitLab for Dev Spaces and
-## create a PushSecret to persist credentials to Vault
-#########################################################
-
-- name: Register Dev Spaces application in GitLab
-  community.general.gitlab_application:
-    api_url: https://gitlab.{{ domain }}
-    api_username: root
-    api_password: "{{ decoded_secret }}"
-    name: "Dev Spaces"
-    redirect_uri: "https://devspaces.{{ domain }}/api/oauth/callback"
-    scopes:
-      - api
-      - write_repository
-      - openid
-    state: present
-  register: gitlab_app_result
-
-- name: Create local secret for ESO source
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: gitlab-app-credentials-source
-        namespace: openshift-devspaces
-      type: Opaque
-      data:
-        devspaces-app-id: "{{ gitlab_app_result.application_id | b64encode }}"
-        devspaces-app-secret: "{{ gitlab_app_result.secret | b64encode }}"
-
-- name: Import GitLab - Push Admin Token
-  community.okd.k8s:
-    host: "{{ api_url }}"
-    api_key: "{{ token }}"
-    validate_certs: "{{ validate_certs }}"
-    definition:
-      apiVersion: external-secrets.io/v1alpha1
-      kind: PushSecret
-      metadata:
-        name: gitlab-devspaces-app
-        namespace: openshift-devspaces
-      spec:
-        deletionPolicy: Delete
-        refreshInterval: 10s
-        secretStoreRefs:
-          - name: eso-admin-secret-store
-            kind: ClusterSecretStore
-        selector:
-          secret:
-            name: gitlab-app-credentials-source
-        data:
-          - match:
-              secretKey: devspaces-app-id
-              remoteRef:
-                remoteKey: gitlab
-                property: devspaces-app-id
-          - match:
-              secretKey: devspaces-app-secret
-              remoteRef:
-                remoteKey: gitlab
-                property: devspaces-app-secret
+- name: "Display Manual Trusted Configuration URL"
+  ansible.builtin.debug:
+    msg: 
+      - "****************************************************************"
+      - "ACTION REQUIRED: ADMIN TO MANUALLY SET APPLICATION TO TRUSTED"
+      - "URL: https://gitlab.{{ domain }}/admin/applications"
+      - "****************************************************************"
