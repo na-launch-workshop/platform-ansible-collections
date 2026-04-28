@@ -165,14 +165,14 @@
           # BOOST THESE BASED ON CONTROLLER LOAD
           resources:
             limits:
-              cpu: '1'
-              memory: 2Gi
+              cpu: '2'
+              memory: 4Gi
             requests:
               cpu: 250m
-              memory: 1Gi
-          # sharding:
-          #   enabled: true
-          #   replicas: 2
+              memory: 2Gi
+          sharding:
+            enabled: true
+            replicas: 2
 
         applicationSet:
           extraCommandArgs:
