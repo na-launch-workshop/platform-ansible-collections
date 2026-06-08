@@ -190,8 +190,8 @@
         - openshift.credentials.admin is defined
       ansible.builtin.set_fact:
         cluster_credentials:
-          username: "{{ credentials.admin.username }}"
-          password: "{{ credentials.admin.password }}"
+          username: "{{ openshift.credentials.admin.username }}"
+          password: "{{ openshift.credentials.admin.password }}"
 
     ## OVERRIDE Global WITH DECLARED CREDENTIALS
     - name: Override Credentials
@@ -253,7 +253,17 @@
 - debug:
     var: cluster_credentials
 
-- name: Connecting to OpenShift - Can Take up to 7-15 Minutes
+# - name: Connecting to OpenShift - Can Take up to 7-15 Minutes
+#   community.okd.openshift_auth:
+#     host: "{{ cluster_api_url }}"
+#     username: "{{ cluster_credentials.username }}"
+#     password: "{{ cluster_credentials.password }}"
+#     verify_ssl: false
+#   register: login
+#   retries: 45
+#   delay: 30
+
+- name: Login to OCP cluster
   community.okd.openshift_auth:
     host: "{{ cluster_api_url }}"
     username: "{{ cluster_credentials.username }}"
@@ -263,25 +273,35 @@
   retries: 45
   delay: 30
 
-- name: Debug OpenShift login
-  ansible.builtin.debug:
-    msg:
-      - "API URL: {{ cluster_api_url }}"
-      - "Token defined: {{ login.openshift_auth.api_key is defined }}"
-      - "Token length: {{ login.openshift_auth.api_key | default('') | length }}"
+- name: Assert login returned a token
+  ansible.builtin.assert:
+    that:
+      - login.openshift_auth.api_key is defined
+      - login.openshift_auth.api_key | length > 0
+    fail_msg: "openshift_auth succeeded but returned no api_key — check credentials and API URL"
 
-- name: Debug ClusterOperator status (no until)
+- name: Store cluster auth facts
+  ansible.builtin.set_fact:
+    ocp_auth: "{{ login.openshift_auth }}"
+  no_log: true
+
+- name: Wait for OpenShift Healthy State
   kubernetes.core.k8s_info:
-    host: "{{ cluster_api_url }}"
-    api_key: "{{ login.openshift_auth.api_key }}"
-    validate_certs: "{{ validate_certs }}"
+    host: "{{ ocp_auth.host }}"
+    api_key: "{{ ocp_auth.api_key }}"
+    validate_certs: "{{ ocp_auth.validate_certs }}"
     api_version: config.openshift.io/v1
     kind: ClusterOperator
     name: kube-apiserver
-  register: co_debug
-  failed_when: false
-- ansible.builtin.debug:
-    var: co_debug
+  register: co_info
+  until:
+    - co_info.resources is defined
+    - co_info.resources | length > 0
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+  retries: 60
+  delay: 15
 
 #- name: Waiting for OpenShift Healthy State - Can Take up to 12-15 Minutes
 #  kubernetes.core.k8s_info:
@@ -298,26 +318,26 @@
 #  retries: 40
 #  delay: 30
 
-- name: Wait for OpenShift Healthy State - Can Take up to 12-15 Minutes
-  kubernetes.core.k8s_info:
-    host: "{{ cluster_api_url }}"
-    api_key: "{{ login.openshift_auth.api_key }}"
-    validate_certs: "{{ validate_certs }}"
-    api_version: config.openshift.io/v1
-    kind: ClusterOperator
-    name: kube-apiserver
-  register: co_info
-  until:
-    - co_info.resources is defined
-    - co_info.resources | length > 0
-    # Condition: Available must be True
-    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
-    # Condition: Progressing must be False (indicates reconciliation is finished)
-    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
-    # Condition: Degraded must be False
-    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
-  retries: 60
-  delay: 15
+# - name: Wait for OpenShift Healthy State - Can Take up to 12-15 Minutes
+#   kubernetes.core.k8s_info:
+#     host: "{{ cluster_api_url }}"
+#     api_key: "{{ login.openshift_auth.api_key }}"
+#     validate_certs: "{{ validate_certs }}"
+#     api_version: config.openshift.io/v1
+#     kind: ClusterOperator
+#     name: kube-apiserver
+#   register: co_info
+#   until:
+#     - co_info.resources is defined
+#     - co_info.resources | length > 0
+#     # Condition: Available must be True
+#     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+#     # Condition: Progressing must be False (indicates reconciliation is finished)
+#     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+#     # Condition: Degraded must be False
+#     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+#   retries: 60
+#   delay: 15
 
 - name: Fetch Cluster Ingress
   kubernetes.core.k8s_info:
