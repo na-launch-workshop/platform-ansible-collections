@@ -32,8 +32,8 @@
     - openshift.credentials.admin is defined
   ansible.builtin.set_fact:
     cluster_credentials:
-      username: "{{ openshift.credentials.admin.username }}"
-      password: "{{ openshift.credentials.admin.password }}"
+      username: "{{ credentials.admin.username }}"
+      password: "{{ credentials.admin.password }}"
 
 ######################################################################
 ######################################################################
@@ -190,8 +190,8 @@
         - openshift.credentials.admin is defined
       ansible.builtin.set_fact:
         cluster_credentials:
-          username: "{{ openshift.credentials.admin.username }}"
-          password: "{{ openshift.credentials.admin.password }}"
+          username: "{{ credentials.admin.username }}"
+          password: "{{ credentials.admin.password }}"
 
     ## OVERRIDE Global WITH DECLARED CREDENTIALS
     - name: Override Credentials
