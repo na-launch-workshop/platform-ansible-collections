@@ -32,8 +32,8 @@
     - openshift.credentials.admin is defined
   ansible.builtin.set_fact:
     cluster_credentials:
-      username: "{{ credentials.admin.username }}"
-      password: "{{ credentials.admin.password }}"
+      username: "{{ openshift.credentials.admin.username }}"
+      password: "{{ openshift.credentials.admin.password }}"
 
 ######################################################################
 ######################################################################
@@ -280,23 +280,39 @@
       - login.openshift_auth.api_key | length > 0
     fail_msg: "openshift_auth succeeded but returned no api_key — check credentials and API URL"
 
-- name: Store cluster auth facts
-  ansible.builtin.set_fact:
-    ocp_auth: "{{ login.openshift_auth }}"
-  no_log: true
+- name: Debug kube-apiserver ClusterOperator status
+  kubernetes.core.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: false
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+    name: kube-apiserver
+  register: co_debug
+  failed_when: false
+
+- name: Show kube-apiserver ClusterOperator conditions
+  ansible.builtin.debug:
+    msg:
+      - "API call failed: {{ co_debug.failed | default(false) }}"
+      - "API error: {{ co_debug.msg | default('none') }}"
+      - "Resource count: {{ co_debug.resources | default([]) | length }}"
+      - "Conditions: {{ co_debug.resources[0].status.conditions | default([]) if (co_debug.resources | default([]) | length > 0) else 'unavailable' }}"
 
 - name: Wait for OpenShift Healthy State
   kubernetes.core.k8s_info:
-    host: "{{ ocp_auth.host }}"
-    api_key: "{{ ocp_auth.api_key }}"
-    validate_certs: "{{ ocp_auth.validate_certs }}"
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: false
     api_version: config.openshift.io/v1
     kind: ClusterOperator
     name: kube-apiserver
   register: co_info
   until:
+    - not co_info.failed | default(false)
     - co_info.resources is defined
     - co_info.resources | length > 0
+    - co_info.resources[0].status.conditions is defined
     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
     - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
