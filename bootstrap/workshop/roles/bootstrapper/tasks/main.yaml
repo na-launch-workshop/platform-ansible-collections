@@ -263,6 +263,26 @@
   retries: 45
   delay: 30
 
+- name: Debug OpenShift login
+  ansible.builtin.debug:
+    msg:
+      - "API URL: {{ cluster_api_url }}"
+      - "Token defined: {{ login.openshift_auth.api_key is defined }}"
+      - "Token length: {{ login.openshift_auth.api_key | default('') | length }}"
+
+- name: Debug ClusterOperator status (no until)
+  kubernetes.core.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+    name: kube-apiserver
+  register: co_debug
+  failed_when: false
+- ansible.builtin.debug:
+    var: co_debug
+
 #- name: Waiting for OpenShift Healthy State - Can Take up to 12-15 Minutes
 #  kubernetes.core.k8s_info:
 #    host: "{{ cluster_api_url }}"
