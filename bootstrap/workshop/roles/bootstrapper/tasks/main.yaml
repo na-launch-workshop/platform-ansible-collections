@@ -327,42 +327,16 @@
 # - name: Get Domain from Cluster Ingress
 #   set_fact:
 #     ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
-- name: Ensure .kube directory exists
-  ansible.builtin.file:
-    path: ~/.kube
-    state: directory
-    mode: '0755'
 
-- name: Generate Manual Kubeconfig (Bypass Apple Silicon oc crash & Python auth bug)
-  ansible.builtin.copy:
-    dest: ~/.kube/config
-    mode: '0600'
-    content: |
-      apiVersion: v1
-      clusters:
-      - cluster:
-          insecure-skip-tls-verify: true
-          server: {{ cluster_api_url }}
-        name: openshift
-      contexts:
-      - context:
-          cluster: openshift
-          user: admin
-        name: default
-      current-context: default
-      kind: Config
-      preferences: {}
-      users:
-      - name: admin
-        user:
-          token: {{ login.openshift_auth.api_key }}
-
+- name: Hot-Patch Python Kubernetes Library in Container (Fixes 403 Bug)
+  ansible.builtin.shell: >
+    python3 -m pip install "kubernetes>=28.1.0" "urllib3<2.0" "requests" --upgrade --ignore-installed
+  changed_when: false
 
 - name: Install OpenShift-GitOps Operator
   vars:
-    api_url: "{{ omit }}"
-    token: "{{ omit }}"
-    # Removed token variable so it defaults to ~/.kube/config
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
   ansible.builtin.include_role:
     name: gitops-operator
   when:
@@ -370,9 +344,9 @@
 
 - name: Configure OpenShift-GitOps Instance
   vars:
-    api_url: "{{ omit }}"
-    token: "{{ omit }}"
-    # Removed token variable so it defaults to ~/.kube/config
+    domain: "{{ ingress_domain }}"
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
     workshop: "{{ cluster.workshop }}"
   ansible.builtin.include_role:
     name: gitops-instance
@@ -381,8 +355,9 @@
 
 - name: Secrets Management
   vars:
-    api_url: "{{ omit }}"
-    token: "{{ omit }}"
+    api_url: "{{ cluster_api_url }}"
+    token: "{{ login.openshift_auth.api_key }}"
+    secrets: "{{ cluster.secrets }}"
     rosa_token: "{{ cluster.providerCredentials.rosa_token }}"
     aro_credentials:
       CLIENT_ID: "{{ cluster.providerCredentials.client_id }}"
