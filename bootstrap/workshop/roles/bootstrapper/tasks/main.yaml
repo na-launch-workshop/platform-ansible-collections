@@ -328,6 +328,18 @@
 #   set_fact:
 #     ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
 
+- name: Generate Global Kubeconfig (Bypass Python Auth Bug)
+  ansible.builtin.shell: >
+    oc login {{ cluster_api_url }} 
+    -u "{{ cluster_credentials.username }}" 
+    -p "{{ cluster_credentials.password }}" 
+    --insecure-skip-tls-verify=true
+  register: cli_login
+  retries: 5
+  delay: 10
+  until: cli_login.rc == 0
+  changed_when: false
+
 - name: Install OpenShift-GitOps Operator
   vars:
     api_url: "{{ cluster_api_url }}"
