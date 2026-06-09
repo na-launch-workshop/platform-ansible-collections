@@ -263,75 +263,55 @@
   retries: 45
   delay: 30
 
-# - name: Waiting for OpenShift Healthy State - Can Take up to 12-15 Minutes
-#   kubernetes.core.k8s_info:
-#     host: "{{ cluster_api_url }}"
-#     api_key: "{{ login.openshift_auth.api_key }}"
-#     validate_certs: "{{ validate_certs }}"
-#     api_version: v1
-#     kind: Pod
-#   register: pod_info
-#   until:
-#     - pod_info.resources is defined
-#     - pod_info.resources | length > 0
-#     - pod_info.resources | selectattr('status.phase', 'equalto', 'Pending') | length == 0
-#   retries: 40
-#   delay: 30
+#- name: Waiting for OpenShift Healthy State - Can Take up to 12-15 Minutes
+#  kubernetes.core.k8s_info:
+#    host: "{{ cluster_api_url }}"
+#    api_key: "{{ login.openshift_auth.api_key }}"
+#    validate_certs: "{{ validate_certs }}"
+#    api_version: v1
+#    kind: Pod
+#  register: pod_info
+#  until:
+#    - pod_info.resources is defined
+#    - pod_info.resources | length > 0
+#    - pod_info.resources | selectattr('status.phase', 'equalto', 'Pending') | length == 0
+#  retries: 40
+#  delay: 30
 
 - name: Wait for OpenShift Healthy State - Can Take up to 12-15 Minutes
-  ansible.builtin.uri:
-    url: "{{ cluster_api_url }}/apis/config.openshift.io/v1/clusteroperators/kube-apiserver"
-    method: GET
-    validate_certs: false
-    headers:
-      Authorization: "Bearer {{ login.openshift_auth.api_key }}"
-    return_content: true
+  kubernetes.core.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+    name: kube-apiserver
   register: co_info
   until:
-    - co_info.status == 200
-    - co_info.json is defined
-    - co_info.json.status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
-    - co_info.json.status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
-    - co_info.json.status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
+    - co_info.resources is defined
+    - co_info.resources | length > 0
+    # Condition: Available must be True
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'True') | list | length > 0
+    # Condition: Progressing must be False (indicates reconciliation is finished)
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | selectattr('status', 'equalto', 'False') | list | length > 0
+    # Condition: Degraded must be False
+    - co_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Degraded') | selectattr('status', 'equalto', 'False') | list | length > 0
   retries: 60
   delay: 15
 
 - name: Fetch Cluster Ingress
-  ansible.builtin.uri:
-    url: "{{ cluster_api_url }}/apis/config.openshift.io/v1/ingresses/cluster"
-    method: GET
-    validate_certs: false
-    headers:
-      Authorization: "Bearer {{ login.openshift_auth.api_key }}"
-    return_content: true
+  kubernetes.core.k8s_info:
+    host: "{{ cluster_api_url }}"
+    api_key: "{{ login.openshift_auth.api_key }}"
+    validate_certs: "{{ validate_certs }}"
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
   register: ingress_info
 
 - name: Get Domain from Cluster Ingress
-  ansible.builtin.set_fact:
-    ingress_domain: "{{ ingress_info.json.spec.domain | regex_replace('^apps\\.', '') }}"
-
-# - name: Fetch Cluster Ingress
-#   kubernetes.core.k8s_info:
-#     host: "{{ cluster_api_url }}"
-#     api_key: "{{ login.openshift_auth.api_key }}"
-#     validate_certs: "{{ validate_certs }}"
-#     api_version: config.openshift.io/v1
-#     kind: Ingress
-#     name: cluster
-#   register: ingress_info
-#   environment:
-#     K8S_AUTH_API_KEY: "{{ login.openshift_auth.api_key }}"
-#     K8S_AUTH_HOST: "{{ cluster_api_url }}"
-#     K8S_AUTH_VERIFY_SSL: "no"
-
-# - name: Get Domain from Cluster Ingress
-#   set_fact:
-#     ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
-
-- name: Hot-Patch Python Kubernetes Library in Container (Fixes 403 Bug)
-  ansible.builtin.shell: >
-    python3 -m pip install "kubernetes>=28.1.0" "urllib3<2.0" "requests" --upgrade --ignore-installed
-  changed_when: false
+  set_fact:
+    ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
 
 - name: Install OpenShift-GitOps Operator
   vars:
