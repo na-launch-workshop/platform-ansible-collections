@@ -327,6 +327,36 @@
 # - name: Get Domain from Cluster Ingress
 #   set_fact:
 #     ingress_domain: "{{ ingress_info.resources[0].spec.domain | regex_replace('^apps\\.', '') }}"
+- name: Ensure .kube directory exists
+  ansible.builtin.file:
+    path: ~/.kube
+    state: directory
+    mode: '0755'
+
+- name: Generate Manual Kubeconfig (Bypass Apple Silicon oc crash & Python auth bug)
+  ansible.builtin.copy:
+    dest: ~/.kube/config
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      clusters:
+      - cluster:
+          insecure-skip-tls-verify: true
+          server: {{ cluster_api_url }}
+        name: openshift
+      contexts:
+      - context:
+          cluster: openshift
+          user: admin
+        name: default
+      current-context: default
+      kind: Config
+      preferences: {}
+      users:
+      - name: admin
+        user:
+          token: {{ login.openshift_auth.api_key }}
+
 
 - name: Install OpenShift-GitOps Operator
   vars:
