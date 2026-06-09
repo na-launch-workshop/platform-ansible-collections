@@ -360,7 +360,8 @@
 
 - name: Install OpenShift-GitOps Operator
   vars:
-    api_url: "{{ cluster_api_url }}"
+    api_url: "{{ omit }}"
+    token: "{{ omit }}"
     # Removed token variable so it defaults to ~/.kube/config
   ansible.builtin.include_role:
     name: gitops-operator
@@ -369,8 +370,8 @@
 
 - name: Configure OpenShift-GitOps Instance
   vars:
-    domain: "{{ ingress_domain }}"
-    api_url: "{{ cluster_api_url }}"
+    api_url: "{{ omit }}"
+    token: "{{ omit }}"
     # Removed token variable so it defaults to ~/.kube/config
     workshop: "{{ cluster.workshop }}"
   ansible.builtin.include_role:
@@ -380,9 +381,8 @@
 
 - name: Secrets Management
   vars:
-    api_url: "{{ cluster_api_url }}"
-    # Removed token variable so it defaults to ~/.kube/config
-    secrets: "{{ cluster.secrets }}"
+    api_url: "{{ omit }}"
+    token: "{{ omit }}"
     rosa_token: "{{ cluster.providerCredentials.rosa_token }}"
     aro_credentials:
       CLIENT_ID: "{{ cluster.providerCredentials.client_id }}"
