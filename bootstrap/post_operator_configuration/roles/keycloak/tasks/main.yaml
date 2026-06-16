@@ -1,3 +1,11 @@
+- name: Retrieve Keycloak Admin Secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: keycloak
+  register: keycloak_admin_secret
+
 - name: Format Configuration Variables
   set_fact:
     config:
@@ -11,8 +19,8 @@
         client_id: "{{ lookup('env', 'CLIENT_ID') }}"
         client_secret: "{{ lookup('env', 'CLIENT_SECRET') }}"
       idp:
-        username: "{{ lookup('env', 'ADMIN_USERNAME') }}"
-        password: "{{ lookup('env', 'ADMIN_PASSWORD') }}"
+        username: "{{ keycloak_admin_secret.resources[0].data.username | b64decode }}"
+        password: "{{ keycloak_admin_secret.resources[0].data.password | b64decode }}"
         issuer_url: https://keycloak.{{ domain }}/realms/{{ lookup('env', 'CLIENT_ID') }}
 
 - name: Get cluster infrastructure info
