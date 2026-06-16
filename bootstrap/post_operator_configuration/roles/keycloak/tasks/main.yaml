@@ -13,7 +13,7 @@
       idp:
         username: "{{ lookup('env', 'ADMIN_USERNAME') }}"
         password: "{{ lookup('env', 'ADMIN_PASSWORD') }}"
-        issuer_url: https://keycloak-keycloak.{{ domain }}/auth/realms/{{ lookup('env', 'CLIENT_ID') }}
+        issuer_url: https://keycloak.{{ domain }}/realms/{{ lookup('env', 'CLIENT_ID') }}
 
 - name: Get cluster infrastructure info
   kubernetes.core.k8s_info:
@@ -91,7 +91,7 @@
     - debug:
         msg: "not rosa"
 
-    - name: Create Keyclock OAuth Secret
+    - name: Create Keycloak OAuth Secret
       kubernetes.core.k8s:
         definition:
           apiVersion: v1
@@ -119,8 +119,7 @@
                   clientID: "{{ config.client.client_id }}"
                   clientSecret:
                     name: keycloak-client-secret
-                  issuer:
-                    https://keycloak-keycloak.{{ domain }}/auth/realms/{{ config.client.client_id }}
+                  issuer: "https://keycloak.{{ domain }}/realms/{{ config.client.client_id }}"
                   claims:
                     groups:
                       - groups
@@ -131,10 +130,10 @@
                     preferredUsername:
                       - preferred_username
 
-- name: Create a Keycloak group, authentication with credentials
+- name: Create workshop-admins Keycloak group
   community.general.keycloak_group:
     auth_client_id: "admin-cli"
-    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    auth_keycloak_url: https://keycloak.{{ domain }}
     validate_certs: false
     auth_realm: master
     auth_username: "{{ config.idp.username }}"
@@ -143,10 +142,10 @@
     realm: "{{ config.client.client_id }}"
   register: group
 
-- name: Create a Keycloak group, authentication with credentials
+- name: Create developers Keycloak group
   community.general.keycloak_group:
     auth_client_id: "admin-cli"
-    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    auth_keycloak_url: https://keycloak.{{ domain }}
     validate_certs: false
     auth_realm: master
     auth_username: "{{ config.idp.username }}"
@@ -157,7 +156,7 @@
 
 - name: Get Keycloak access token
   uri:
-    url: "https://keycloak-keycloak.{{ domain }}/auth/realms/master/protocol/openid-connect/token"
+    url: "https://keycloak.{{ domain }}/realms/master/protocol/openid-connect/token"
     method: POST
     body:
       grant_type: password
@@ -173,7 +172,7 @@
 
 - name: Set default group in Keycloak realm
   uri:
-    url: "https://keycloak-keycloak.{{ domain }}/auth/admin/realms/{{ config.client.client_id }}/default-groups/{{ group.end_state.id }}"
+    url: "https://keycloak.{{ domain }}/admin/realms/{{ config.client.client_id }}/default-groups/{{ group.end_state.id }}"
     method: PUT
     headers:
       Authorization: "Bearer {{ keycloak_token.json.access_token }}"
@@ -204,7 +203,7 @@
 - name: Create initial keycloak users
   community.general.keycloak_user:
     auth_client_id: "admin-cli"
-    auth_keycloak_url: https://keycloak-keycloak.{{ domain }}/auth
+    auth_keycloak_url: https://keycloak.{{ domain }}
     validate_certs: false
     auth_realm: master
     auth_username: "{{ config.idp.username }}"
