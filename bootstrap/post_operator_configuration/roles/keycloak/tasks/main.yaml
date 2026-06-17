@@ -13,8 +13,6 @@
         cluster_name: "{{ cluster_name }}"
         region: "{{ region }}"
         rosa_token: "{{ lookup('env', 'ROSA_TOKEN') }}"
-        aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
-        aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
       client:
         client_id: "{{ lookup('env', 'CLIENT_ID') }}"
         client_secret: "{{ lookup('env', 'CLIENT_SECRET') }}"
@@ -34,70 +32,41 @@
   set_fact:
     is_rosa: "{{ infra_result.resources[0].status.platform | lower == 'aws' }}"
 
-- name: Patch With ROSA CLI
+- name: Configure IDP via ROSA CLI
   when: is_rosa
   block:
 
-    - debug:
-        msg: "Is AWS: {{ is_rosa }}"
-
-    - name: Log ROSA Version
-      command: rosa version
-      register: rosa_version
-    - debug:
-        msg: "{{ rosa_version }}"
-
     - name: Login to ROSA
       command: rosa login --token={{ config.cluster.rosa_token }}
-      register: rosa_login_output
-    - debug:
-        msg: "{{ rosa_login_output.stdout }}"
 
     - name: Check if Identity Provider exists
-      command: |
-        rosa list idps \
-          --cluster={{ config.cluster.cluster_name }} \
-          --region={{ config.cluster.region }} \
-          -o json
+      command: >
+        rosa list idps
+        --cluster={{ config.cluster.cluster_name }}
+        --region={{ config.cluster.region }}
+        -o json
       register: rosa_idps
-    - name: Set IDP Facts
-      set_fact:
-        idp: "{{ rosa_idps.stdout | from_json }}"
-    - debug:
-        msg: "{{ idp }}"
 
-    - debug:
-        msg: "idp does exists"
-      when: idp | selectattr('name', 'equalto', config.client.client_id) | list | length > 0
+    - name: Add ROSA Identity Provider
+      when: (rosa_idps.stdout | from_json) | selectattr('name', 'equalto', config.client.client_id) | list | length < 1
+      command: >
+        rosa create idp
+        --cluster={{ config.cluster.cluster_name }}
+        --name={{ config.client.client_id }}
+        --type=openid
+        --client-id={{ config.client.client_id }}
+        --client-secret={{ config.client.client_secret }}
+        --issuer-url={{ config.idp.issuer_url }}
+        --mapping-method=claim
+        --email-claims=email
+        --name-claims=name
+        --groups-claims=groups
+        --username-claims=preferred_username
+        --region={{ config.cluster.region }}
 
-    - name: Add Identity Provider if not exists
-      when: idp | selectattr('name', 'equalto', config.client.client_id) | list | length < 1
-      block:
-        - name: Add ROSA Identity Provider
-          command: >
-            rosa create idp
-            --cluster={{ config.cluster.cluster_name }}
-            --name={{ config.client.client_id }}
-            --type="openid"
-            --client-id={{ config.client.client_id }}
-            --client-secret={{ config.client.client_secret }}
-            --issuer-url={{ config.idp.issuer_url }}
-            --mapping-method="claim"
-            --email-claims="email"
-            --name-claims="name"
-            --groups-claims="groups"
-            --username-claims="preferred_username"
-            --region={{ config.cluster.region }}
-          register: add_idp_output
-        - debug:
-            msg: "idp does not exist"
-
-- name: Patch OAuth (OCP/ARO/SNO/etc.)
+- name: Configure IDP via OAuth resource
   when: not is_rosa
   block:
-
-    - debug:
-        msg: "not rosa"
 
     - name: Create Keycloak OAuth Secret
       kubernetes.core.k8s:
@@ -117,7 +86,6 @@
           kind: OAuth
           metadata:
             name: cluster
-            namespace: openshift-config
           spec:
             identityProviders:
               - name: "keycloak"
@@ -127,7 +95,7 @@
                   clientID: "{{ config.client.client_id }}"
                   clientSecret:
                     name: keycloak-client-secret
-                  issuer: "https://keycloak.{{ domain }}/realms/{{ config.client.client_id }}"
+                  issuer: "{{ config.idp.issuer_url }}"
                   claims:
                     groups:
                       - groups
