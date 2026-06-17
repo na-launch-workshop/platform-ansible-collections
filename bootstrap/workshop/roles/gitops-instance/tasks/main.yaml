@@ -151,10 +151,6 @@
             server:
               timeout:
                 seconds: "180"
-          status:
-            processors: "60"
-          operation:
-            processors: "30"
           # Infinite Retries
           k8sclient:
             retry:
@@ -170,9 +166,12 @@
             requests:
               cpu: 250m
               memory: 2Gi
+          processors:
+            status: 60      # default is 20
+            operation: 30   # default is 10
           sharding:
             enabled: true
-            replicas: 2
+            replicas: 4
 
         applicationSet:
           extraCommandArgs:
@@ -180,14 +179,14 @@
           # BOOST THESE BASED ON APP CONTROLLER LOAD
           resources:
             limits:
-              cpu: '1'
-              memory: 2Gi
+              cpu: '2'
+              memory: 4Gi
             requests:
               cpu: 250m
               memory: 1Gi
-          # sharding:
-          #   enabled: true
-          #   replicas: 2
+          sharding:
+            enabled: true
+            replicas: 2
         server:
           route:
             enabled: true
