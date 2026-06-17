@@ -47,8 +47,16 @@
         -o json
       register: rosa_idps
 
-    - name: Add ROSA Identity Provider
-      when: (rosa_idps.stdout | from_json) | selectattr('name', 'equalto', config.client.client_id) | list | length < 1
+    - name: Delete stale ROSA Identity Provider
+      when: (rosa_idps.stdout | from_json) | selectattr('name', 'equalto', config.client.client_id) | list | length > 0
+      command: >
+        rosa delete idp
+        --cluster={{ config.cluster.cluster_name }}
+        --region={{ config.cluster.region }}
+        --yes
+        {{ config.client.client_id }}
+
+    - name: Create ROSA Identity Provider
       command: >
         rosa create idp
         --cluster={{ config.cluster.cluster_name }}
